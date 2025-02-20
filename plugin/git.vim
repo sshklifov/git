@@ -187,25 +187,28 @@ endfunction
 
 """"""""""""""""""""""""" Utils that throw """""""""""""""""""""""""" {{{
 function! git#InsideGitOrThrow()
-  call git#ExecuteOrThrow(["status"], "Not inside repo!")
+  let dict = FugitiveExecute(["status"])
+  if dict['exit_status'] != 0
+    throw "Not inside repo!"
+  endif
 endfunction
 
 function! git#CleanOrThrow()
-  let output = init#FugitiveExecuteOrThrow(["status", "--porcelain"], "Not inside repo!")
+  let output = git#ExecuteOrThrow(["status", "--porcelain"], "Not inside repo!")
   if output[0] != ''
     throw "Work tree not clean"
   endif
 endfunction
 
 function! git#GetBranchOrThrow()
-  let output = init#FugitiveExecuteOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], "Not inside repo!")
+  let output = git#ExecuteOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], "Not inside repo!")
   return output[0]
 endfunction
 
 function! git#BranchOrThrow(arg)
   call git#CleanOrThrow()
-  call init#FugitiveExecuteOrThrow(["checkout", a:arg], "Failed to checkouot " .. a:arg)
-  call init#FugitiveExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed!")
+  call git#ExecuteOrThrow(["checkout", a:arg], "Failed to checkouot " .. a:arg)
+  call git#ExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed!")
 endfunction
 
 function! git#GetRefs(ref_dirs, arg)
@@ -214,7 +217,7 @@ function! git#GetRefs(ref_dirs, arg)
   for dir in dirs
     if isdirectory(dir)
       let pat = dir . ".*" . a:arg . ".*"
-      let result += Find(dir, "-type", "f", "-regex", pat, "-printf", "%P\n")
+      let result += GetFiles(dir, "-type", "f", "-regex", pat, "-printf", "%P\n")
     endif
   endfor
   return result
@@ -247,7 +250,7 @@ endfunction
 function! git#BranchCommitsOrThrow(branch, main)
   let range = printf("%s..%s", a:main, a:branch)
   let cmd = ["log", range, "--pretty=format:%H"]
-  return init#FugitiveExecuteOrThrow(cmd, "Revision range failed!")
+  return git#ExecuteOrThrow(cmd, "Revision range failed!")
 endfunction
 
 function! git#CommonParentOrThrow(branch, main)
@@ -265,7 +268,7 @@ endfunction
 
 function! git#RefExistsOrThrow(commit)
   let msg = "Unknown ref to git: " . a:commit
-  call init#FugitiveExecuteOrThrow(["show", a:commit], msg)
+  call git#ExecuteOrThrow(["show", a:commit], msg)
 endfunction
 ""}}}
 
@@ -484,17 +487,21 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Review """"""""""""""""""""""""""" {{{
-function! git#Review(arg)
+function! git#Review(bang, arg)
   try
     " Refresh current state of review
     if exists("g:git_review_stack")
-      let items = g:git_review_stack[-1]
-      call DisplayInQf(items, "Review")
-      echo "Review in progress, refreshing quickfix..."
-      return
+      if !empty(a:bang)
+        unlet g:git_review_stack
+      else
+        let items = g:git_review_stack[-1]
+        call DisplayInQf(items, "Review")
+        echo "Review in progress, refreshing quickfix..."
+        return
+      endif
     endif
 
-    let bpoint = s:BaselineOrThrow(a:arg)
+    let bpoint = git#BaselineOrThrow(a:arg)
     " Load files for review.
     " If possible, make the diff windows editable by not passing a ref to fugitive
     if get(a:, "arg", "") == "HEAD"
@@ -674,13 +681,13 @@ function! git#Install()
   command! -nargs=0 Dangle call git#DangleCommand()
 
   command! -nargs=? -complete=customlist,BranchCompl Base echo git#BaselineOrThrow(<q-args>)
-  command! -nargs=0 -complete=customlist,BranchCompl Squash call git#SquashCommand()
+  command! Squash call git#SquashCommand()
   command! -nargs=0 Rebase call git#RebaseCommand()
   command! -nargs=0 Changes call git#ChangesCommand()
 
-  command! -nargs=? -complete=customlist,BranchCompl Review call git#Review(<q-args>)
-  command! -nargs=0 D Review HEAD
-  command! -nargs=* R Review <q-args>
+  command! -nargs=? -bang -complete=customlist,BranchCompl Review call git#Review("<bang>", <q-args>)
+  command! -nargs=0 -bang D Review<bang> HEAD
+  command! -nargs=? -bang R Review<bang> <args>
   command! -bang -nargs=? -complete=customlist,CompleteCompl Complete call git#CompleteFiles('<bang>', <q-args>)
   command! -nargs=0 Uncomplete call git#UncompleteFiles()
 
@@ -690,4 +697,8 @@ function! git#Install()
   command! -nargs=0 Todo call git#Pickaxe('TODO')
   command! -nargs=* Pickaxe call git#Pickaxe(<q-args>)
 endfunction
+
+if get(g:, 'git_install', v:false)
+  call git#Install()
+endif
 ""}}}
