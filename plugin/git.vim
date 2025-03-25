@@ -33,9 +33,32 @@ function! git#EditFugitive()
   endif
 endfunction
 
-function! git#EditCommit()
-  let commit = FugitiveParse()[0]
-  exe "Gedit " .. commit
+function! git#ShowNameOnly(arg)
+  if a:arg =~ '\x\{7,40\}'
+    " Single commit only.
+    let files = git#ExecuteOrThrow(["show", "--name-only", "--pretty=format:", a:arg])
+  else
+    " Changes made by branch (relative to mainline).
+    let mainline = git#GetMasterOrThrow(v:true)
+    let bpoint = git#CommonParentOrThrow(a:arg, mainline)
+    let range = printf('%s..%s', bpoint, a:arg)
+    let files = git#ExecuteOrThrow(["diff", "--name-only", range])
+  endif
+  call filter(files, '!empty(v:val)')
+  let repo = FugitiveWorkTree() .. '/'
+  call map(files, 'repo .. v:val')
+
+  sp
+  let fugitive_objects = []
+  for file in files
+    exe printf("Gedit %s:%s", a:arg, file)
+    setlocal bufhidden=
+    let b:commitish = bpoint
+    call add(fugitive_objects, bufname())
+  endfor
+  quit
+
+  call DisplayInQf(fugitive_objects, 'Changes')
 endfunction
 
 function! git#NextContext(reverse)
@@ -86,9 +109,10 @@ function! git#CanStartDiff()
   if len(winfos) != 1
     return 0
   endif
-  " Must exist on disk
+  " Must exist on disk (or fugitive object)
   let bufnr = winfos[0].bufnr
-  if !filereadable(bufname(bufnr))
+  let name = bufname(bufnr)
+  if name[:11] != "fugitive:///" && !filereadable(name)
     return 0
   endif
   " Must be inside git
@@ -475,15 +499,6 @@ function! git#RebaseCommand()
     echo v:exception
   endtry
 endfunction
-
-function! git#ChangesCommand()
-  try
-    let bpoint = git#BaselineOrThrow()
-    exe printf("G log %s..HEAD", bpoint)
-  catch
-    echo v:exception
-  endtry
-endfunction
 ""}}}
 
 """"""""""""""""""""""""" Review """"""""""""""""""""""""""" {{{
@@ -653,13 +668,16 @@ endfunction
 """"""""""""""""""""""""" Install """"""""""""""""""""""""""" {{{
 function! git#Install()
   nnoremap <silent> <leader>fug <cmd> call git#EditFugitive()<CR>
-  nnoremap <silent> <leader>com <cmd> call git#EditCommit()<CR>
+  nnoremap <silent> <leader>nam <cmd> call git#ShowNameOnly(FugitiveParse()[0])<CR>
   nnoremap <silent> [n <cmd> call git#NextContext(v:true)<CR>
   nnoremap <silent> ]n <cmd> call git#NextContext(v:false)<CR>
   omap an <cmd> call git#ContextMotion()<CR>
 
   nnoremap <silent> <leader>dif <cmd> call git#DiffToggle()<CR>
   autocmd! OptionSet diff call git#DiffToggleMaps()
+
+  command! -nargs=? -complete=customlist,BranchCompl Changes
+        \ call git#ShowNameOnly(<q-args>)
 
   command! -nargs=? -complete=customlist,UnstagedCompl Dirty
         \ call git#GetUnstaged()->FileFilter(<q-args>)->DropInQf("Unstaged")
@@ -683,7 +701,6 @@ function! git#Install()
   command! -nargs=? -complete=customlist,BranchCompl Base echo git#BaselineOrThrow(<q-args>)
   command! Squash call git#SquashCommand()
   command! -nargs=0 Rebase call git#RebaseCommand()
-  command! -nargs=0 Changes call git#ChangesCommand()
 
   command! -nargs=? -bang -complete=customlist,BranchCompl Review call git#Review("<bang>", <q-args>)
   command! -nargs=0 -bang D Review<bang> HEAD
