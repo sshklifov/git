@@ -33,16 +33,30 @@ function! git#EditFugitive()
   endif
 endfunction
 
-function! git#ShowNameOnly(arg)
-  if a:arg =~ '\x\{7,40\}'
-    " Single commit only.
-    let files = git#ExecuteOrThrow(["show", "--name-only", "--pretty=format:", a:arg])
+function! git#GetObjectHash()
+  let ret = split(FugitiveParse()[0], ":")
+  if empty(ret)
+    return ""
   else
+    return ret[0]
+  endif
+endfunction
+
+function! git#ShowChanges(arg)
+  let arg = empty(a:arg) ? git#GetObjectHash() : a:arg
+  if arg =~ '\x\{7,40\}'
+    " Single commit only.
+    let files = git#ExecuteOrThrow(["show", "--name-only", "--pretty=format:", arg])
+    let bpoint = git#HashOrThrow(arg .. "~1")
+  elseif !empty(arg)
     " Changes made by branch (relative to mainline).
     let mainline = git#GetMasterOrThrow(v:true)
-    let bpoint = git#CommonParentOrThrow(a:arg, mainline)
-    let range = printf('%s..%s', bpoint, a:arg)
+    let bpoint = git#CommonParentOrThrow(arg, mainline)
+    let range = printf('%s..%s', bpoint, arg)
     let files = git#ExecuteOrThrow(["diff", "--name-only", range])
+  else
+    echo "No valid start point!"
+    return
   endif
   call filter(files, '!empty(v:val)')
   let repo = FugitiveWorkTree() .. '/'
@@ -51,10 +65,10 @@ function! git#ShowNameOnly(arg)
   sp
   let fugitive_objects = []
   for file in files
-    exe printf("Gedit %s:%s", a:arg, file)
-    setlocal bufhidden=
-    let b:commitish = bpoint
-    call add(fugitive_objects, bufname())
+    let url = FugitiveFind(printf("%s:%s", arg, file))
+    let nr = bufadd(url)
+    call add(fugitive_objects, url)
+    call setbufvar(nr, 'commitish', bpoint)
   endfor
   quit
 
@@ -668,7 +682,6 @@ endfunction
 """"""""""""""""""""""""" Install """"""""""""""""""""""""""" {{{
 function! git#Install()
   nnoremap <silent> <leader>fug <cmd> call git#EditFugitive()<CR>
-  nnoremap <silent> <leader>nam <cmd> call git#ShowNameOnly(FugitiveParse()[0])<CR>
   nnoremap <silent> [n <cmd> call git#NextContext(v:true)<CR>
   nnoremap <silent> ]n <cmd> call git#NextContext(v:false)<CR>
   omap an <cmd> call git#ContextMotion()<CR>
@@ -677,7 +690,7 @@ function! git#Install()
   autocmd! OptionSet diff call git#DiffToggleMaps()
 
   command! -nargs=? -complete=customlist,BranchCompl Changes
-        \ call git#ShowNameOnly(<q-args>)
+        \ call git#ShowChanges(<q-args>)
 
   command! -nargs=? -complete=customlist,UnstagedCompl Dirty
         \ call git#GetUnstaged()->FileFilter(<q-args>)->DropInQf("Unstaged")
