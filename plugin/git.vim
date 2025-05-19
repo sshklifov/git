@@ -370,6 +370,7 @@ endfunction
 
 function! git#BranchCommand(args)
   try
+    call git#CleanOrThrow()
     if empty(a:args)
       call git#OpenBranchBufferOrThrow()
     else
@@ -711,7 +712,7 @@ function! git#Install()
 
   command! -nargs=0 Dangle call git#DangleCommand()
 
-  command! -nargs=? -complete=customlist,BranchCompl Base echo git#BaselineOrThrow(<q-args>)
+  command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
   command! -nargs=0 Rebase call git#RebaseCommand()
 
