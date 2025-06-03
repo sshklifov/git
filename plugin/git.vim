@@ -551,17 +551,36 @@ function! git#Review(bang, arg)
       let bufs = map(getqflist(), "v:val.bufnr")
       call map(bufs, 'setbufvar(v:val, "commitish", bpoint)')
     endif
-    call setqflist([], 'a', #{title: "Review"})
-    let entries = getqflist()
-    if empty(getqflist())
+    let items = s:OrderReviewItems(getqflist())
+    if empty(items)
       echo "Nothing to show."
       cclose
     else
-      let g:git_review_stack = [getqflist()]
+      call DisplayInQf(items, "Review")
+      let g:git_review_stack = [items]
     endif
   catch
     echo v:exception
   endtry
+endfunction
+
+function! s:OrderReviewItems(items)
+  let items = a:items
+  call assert_true(!empty(items))
+  let commitish = getbufvar(items[0].bufnr, "commitish")
+  let cmd = ["diff", "--numstat", commitish, '--']
+  let files = map(copy(items), 'bufname(v:val.bufnr)')
+  call extend(cmd, files)
+
+  let changes = git#ExecuteOrThrow(cmd)
+  for idx in range(len(changes))
+    if !empty(changes[idx])
+      let [added, deleted; _] = split(changes[idx])
+      let items[idx].text = printf('%s insertions(+), %s deletions(-)', added, deleted)
+      let items[idx].order = added + deleted
+    endif
+  endfor
+  return sort(items, {a, b -> a.order - b.order})
 endfunction
 
 function! git#CompleteFiles(cmd_bang, arg) abort
