@@ -231,9 +231,13 @@ function! git#InsideGitOrThrow()
   endif
 endfunction
 
-function! git#CleanOrThrow()
+function! git#IsClean()
   let output = git#ExecuteOrThrow(["status", "--porcelain"], "Not inside repo!")
-  if output[0] != ''
+  return output[0] == ''
+endfunction
+
+function! git#CleanOrThrow()
+  if !git#IsClean()
     throw "Work tree not clean"
   endif
 endfunction
@@ -441,6 +445,10 @@ function! OriginCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
+  if !git#IsClean()
+    return []
+  endif
+
   call FugitiveExecute(['fetch', 'origin'])
   return git#GetRefs(['refs/remotes/origin'], a:ArgLead)
 endfunction
