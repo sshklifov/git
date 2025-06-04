@@ -551,11 +551,11 @@ function! git#Review(bang, arg)
       let bufs = map(getqflist(), "v:val.bufnr")
       call map(bufs, 'setbufvar(v:val, "commitish", bpoint)')
     endif
-    let items = s:OrderReviewItems(getqflist())
-    if empty(items)
+    if empty(getqflist())
       echo "Nothing to show."
       cclose
     else
+      let items = s:OrderReviewItems(getqflist())
       call DisplayInQf(items, "Review")
       let g:git_review_stack = [items]
     endif
@@ -568,6 +568,9 @@ function! s:OrderReviewItems(items)
   let items = a:items
   call assert_true(!empty(items))
   let commitish = getbufvar(items[0].bufnr, "commitish")
+  if commitish == "0"
+    let commitish = "HEAD"
+  endif
   let cmd = ["diff", "--numstat", commitish, '--']
   let files = map(copy(items), 'bufname(v:val.bufnr)')
   call extend(cmd, files)
