@@ -175,32 +175,14 @@ function! git#DiffOtherExecute(cmd)
   endif
 endfunction
 
-function! git#Operator(cmd, pending)
-  let &operatorfunc = function('git#OperatorImpl', [a:cmd])
-  if a:pending
-    return 'g@'
-  else
-    return 'g@_'
-  endif
-endfunction
-
-function! git#OperatorImpl(cmd, type)
-  if a:type != "line"
-    return
-  endif
-  let firstline = line("'[")
-  let lastline = line("']")
-  exe printf("%d,%d%s", firstline, lastline, a:cmd)
-endfunction
-
 function! git#DiffToggleMaps()
   if v:option_new
     " Diff put
-    nnoremap <expr> dp git#Operator("diffput", 1)
-    nnoremap <expr> dP git#Operator("diffput", 0)
+    nnoremap <expr> dp init#Operator("diffput", 1)
+    nnoremap <expr> dP init#Operator("diffput", 0)
     " Diff get
-    nnoremap <expr> do git#Operator("diffget", 1)
-    nnoremap <expr> dO git#Operator("diffget", 0)
+    nnoremap <expr> do init#Operator("diffget", 1)
+    nnoremap <expr> dO init#Operator("diffget", 0)
     " Undoing diffs
     nnoremap dpu <cmd>call git#DiffOtherExecute("undo")<CR>
     " Saving diffs
