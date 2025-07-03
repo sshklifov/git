@@ -213,13 +213,21 @@ function! git#InsideGitOrThrow()
   endif
 endfunction
 
-function! git#IsClean()
-  let output = git#ExecuteOrThrow(["status", "--porcelain"], "Not inside repo!")
-  return output[0] == ''
+function! git#IsClean(...)
+  let arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(arg)
+  let dict = FugitiveExecute([dir, "status", "--porcelain"])
+  return dict['exit_status'] == 0 && dict['stdout'] == ['']
 endfunction
 
-function! git#CleanOrThrow()
-  if !git#IsClean()
+function! git#CleanOrThrow(...)
+  if a:0 > 0
+    let clean = git#IsClean(a:1)
+  else
+    let clean = git#IsClean()
+  endif
+
+  if !clean
     throw "Work tree not clean"
   endif
 endfunction
@@ -241,7 +249,7 @@ function! git#GetRefs(ref_dirs, arg)
   for dir in dirs
     if isdirectory(dir)
       let pat = dir . ".*" . a:arg . ".*"
-      let result += GetFiles(dir, "-type", "f", "-regex", pat, "-printf", "%P\n")
+      let result += qsearch#GetFiles(dir, "-type", "f", "-regex", pat, "-printf", "%P\n")
     endif
   endfor
   return result
@@ -403,7 +411,19 @@ function! git#PullCommand(bang)
       let msg = "Merge failed. Conflicts?"
     endif
     call git#ExecuteOrThrow(args, msg)
-    exe printf("G log -n %d %s", len(commits), commits[0])
+
+    const author_me = "stef"
+    let cmd = printf("G log -n %d %s", len(commits), commits[0])
+    if empty(a:bang) && stridx(branch, "/") > 0 && stridx(branch, author_me) != 0
+      let opts = #{
+            \ prompt: "Different author detected, start a review? ",
+            \ cancelreturn: "n"
+            \ }
+      if input(opts) != "n"
+        let cmd = "R HEAD~" .. len(commits)
+      endif
+    endif
+    exe cmd
   catch
     echo v:exception
   endtry
