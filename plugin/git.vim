@@ -5,8 +5,10 @@ if exists('git#ExecuteOrThrow')
 endif
 
 """"""""""""""""""""""""" Utils """""""""""""""""""""""""" {{{
-function! git#GetBranch()
-  let dict = FugitiveExecute(["branch", "--show-current"])
+function! git#GetBranch(...)
+  let arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(arg)
+  let dict = FugitiveExecute([dir, "branch", "--show-current"])
   if dict['exit_status'] != 0
     return ''
   endif
@@ -243,28 +245,29 @@ function! git#BranchOrThrow(arg)
   call git#ExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed!")
 endfunction
 
-function! git#GetRefs(ref_dirs, arg)
-  let result = []
-  let dirs = map(a:ref_dirs, 'FugitiveGitDir() . "/" . v:val')
-  for dir in dirs
-    if isdirectory(dir)
-      let pat = dir . ".*" . a:arg . ".*"
-      let result += qsearch#GetFiles(dir, "-type", "f", "-regex", pat, "-printf", "%P\n")
-    endif
-  endfor
-  return result
+function! git#GetRefs(ref_prefix, arg)
+  let dict = FugitiveExecute(['for-each-ref', '--format=%(refname)'])
+  if dict['exit_status'] != 0
+    return []
+  endif
+  let refs = dict['stdout']
+  let prefix_len = strlen(a:ref_prefix)
+  call filter(refs, 'v:val[:prefix_len-1] == a:ref_prefix')
+  call map(refs, 'v:val[prefix_len:]')
+  call filter(refs, 'stridx(v:val, a:arg) >= 0')
+  return refs
 endfunction
 
 function! git#GetMasterOrThrow(remote)
   " TODO make candidates configurable
   if a:remote
-    let refs_dir = 'refs/remotes'
+    let refs_dir = 'refs/remotes/'
     let candidates = ['origin/obsidian-master', 'origin/master', 'origin/main']
   else
-    let refs_dir = 'refs/heads'
+    let refs_dir = 'refs/heads/'
     let candidates = ['obsidian-master', 'master', 'main']
   endif
-  let branches = git#GetRefs([refs_dir], 'ma')
+  let branches = git#GetRefs(refs_dir, 'ma')
   for candidate in candidates
     if index(branches, candidate) >= 0
       return candidate
@@ -349,14 +352,12 @@ function! git#OpenBranchBufferOrThrow()
   let cmd = ["for-each-ref", "--sort=-committerdate", "refs/heads/", "--format=%(refname:short)"]
   let branches = git#ExecuteOrThrow(cmd)
   call filter(branches, '!empty(v:val)')
-  call init#CreateCustomQuickfix('Branches', branches, 'git#SelectBranch')
+  call init#CreateOneShotQuickfix('Branches', branches, 'git#SelectBranch')
 endfunction
 
-function! git#SelectBranch()
-  let branch = getline('.')
-  quit
+function! git#SelectBranch(branch)
   try
-    call git#BranchOrThrow(branch)
+    call git#BranchOrThrow(a:branch)
   catch
     echo v:exception
   endtry
@@ -379,7 +380,7 @@ function! BranchCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
-  return git#GetRefs(['refs/heads', 'refs/tags'], a:ArgLead)
+  return git#GetRefs('refs/heads/', a:ArgLead)
 endfunction
 
 function! git#PullCommand(bang)
@@ -411,19 +412,8 @@ function! git#PullCommand(bang)
       let msg = "Merge failed. Conflicts?"
     endif
     call git#ExecuteOrThrow(args, msg)
-
-    const author_me = "stef"
-    let cmd = printf("G log -n %d %s", len(commits), commits[0])
-    if empty(a:bang) && stridx(branch, "/") > 0 && stridx(branch, author_me) != 0
-      let opts = #{
-            \ prompt: "Different author detected, start a review? ",
-            \ cancelreturn: "n"
-            \ }
-      if input(opts) != "n"
-        let cmd = "R HEAD~" .. len(commits)
-      endif
-    endif
-    exe cmd
+    exe printf("G log -n %d %s", len(commits), commits[0])
+    echo printf("Total %d commits", len(commits))
   catch
     echo v:exception
   endtry
@@ -438,8 +428,10 @@ function! git#PushCommand(bang)
       call git#ExecuteOrThrow(["push", "origin", "HEAD"])
     endif
     echo "Up to date with origin."
+    return v:true
   catch
     echo v:exception
+    return v:false
   endtry
 endfunction
 
@@ -452,7 +444,7 @@ function! OriginCompl(ArgLead, CmdLine, CursorPos)
   endif
 
   call FugitiveExecute(['fetch', 'origin'])
-  return git#GetRefs(['refs/remotes/origin'], a:ArgLead)
+  return git#GetRefs('refs/remotes/origin/', a:ArgLead)
 endfunction
 
 function! git#RecentRefs(max_refs)
