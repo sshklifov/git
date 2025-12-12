@@ -4,6 +4,12 @@ if exists('git#ExecuteOrThrow')
   finish
 endif
 
+function git#Invoke(name, ...)
+  let name = expand("<SID>") .. a:name
+  let P = function(name, a:000)
+  return P()
+endfunction
+
 """"""""""""""""""""""""" Utils """""""""""""""""""""""""" {{{
 function! git#GetBranch(...)
   let arg = get(a:000, 0, FugitiveGitDir())
@@ -19,10 +25,13 @@ function! git#ExecuteOrThrow(args, ...)
   let dict = FugitiveExecute(a:args)
   if dict['exit_status'] != 0
     let msg = get(a:000, 0, printf("Git '%s' failed!", join(a:args)))
-    call init#ShowErrors(dict['stderr'])
+    let errors = filter(dict['stderr'], '!empty(v:val)')
+    if !empty(errors)
+      call init#ShowErrors(errors)
+    endif
     throw msg
   endif
-  return dict['stdout']
+  return filter(dict['stdout'], '!empty(v:val)')
 endfunction
 
 function! git#EditFugitive()
@@ -54,13 +63,12 @@ function! git#ShowChanges(arg)
     " Changes made by branch (relative to mainline).
     let mainline = git#GetMasterOrThrow(v:true)
     let bpoint = git#CommonParentOrThrow(arg, mainline)
-    let range = printf('%s..%s', bpoint, arg)
+    let range = printf('%s..%s', gpoint, arg)
     let files = git#ExecuteOrThrow(["diff", "--name-only", range])
   else
     echo "No valid start point!"
     return
   endif
-  call filter(files, '!empty(v:val)')
   let repo = FugitiveWorkTree() .. '/'
   call map(files, 'repo .. v:val')
 
@@ -74,7 +82,8 @@ function! git#ShowChanges(arg)
   endfor
   quit
 
-  call DisplayInQf(fugitive_objects, 'Changes')
+  call qutil#SetQuickfix(fugitive_objects, 'Changes')
+  let g:git_review_stack = [getqflist()]
 endfunction
 
 function! git#NextContext(reverse)
@@ -87,6 +96,42 @@ function! git#ContextMotion()
   call s:Context(v:true)
   exe printf("normal V%dG", end)
 endfunction
+
+function! s:SearchOrStay(pat, flags)
+  if getline('.') !~ a:pat
+    call search(a:pat, a:flags)
+  endif
+endfunction
+
+function! git#OursOrTheirs()
+  if getline('.') =~ '=\{7\}'
+    echo "Ambiguous context!"
+    return
+  endif
+  let view = winsaveview()
+  call s:SearchOrStay('[<=>]\{7}', 'bW')
+
+  if getline('.') =~ '<\{7}'
+    delete
+    call s:SearchOrStay('=\{7}', 'W')
+    let firstline = line('.')
+    call s:SearchOrStay('>\{7}', 'W')
+    let lastline = line('.')
+    exe printf("%d,%ddelete", firstline, lastline)
+  elseif getline('.') =~ '=\{7}'
+    let lastline = line('.')
+    call s:SearchOrStay('<\{7}', 'bW')
+    let firstline = line('.')
+    exe printf("%d,%ddelete", firstline, lastline)
+    call s:SearchOrStay('>\{7}', 'W')
+    delete
+  else
+    echo "Not inside conflict!"
+    call winrestview(view)
+  endif
+endfunction
+
+command! -nargs=0 Resolve call s:OursOrTheirs()
 ""}}}
 
 """"""""""""""""""""""""" Diff open """""""""""""""""""""""""" {{{
@@ -230,7 +275,46 @@ function! git#CleanOrThrow(...)
   endif
 
   if !clean
+    call s:UpdateSubmodule()
+  endif
+
+  if a:0 > 0
+    let clean = git#IsClean(a:1)
+  else
+    let clean = git#IsClean()
+  endif
+
+  if !clean
     throw "Work tree not clean"
+  endif
+endfunction
+
+function! git#IsStaged(...)
+  let arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(arg)
+  let dict = FugitiveExecute([dir, "diff", "--quiet"])
+  return dict['exit_status'] == 0
+endfunction
+
+function! git#StagedOrThrow(...)
+  if a:0 > 0
+    let clean = git#IsStaged(a:1)
+  else
+    let clean = git#IsStaged()
+  endif
+
+  if !clean
+    call s:UpdateSubmodule()
+  endif
+
+  if a:0 > 0
+    let clean = git#IsStaged(a:1)
+  else
+    let clean = git#IsStaged()
+  endif
+
+  if !clean
+    throw "Unstaged changes!"
   endif
 endfunction
 
@@ -239,10 +323,14 @@ function! git#GetBranchOrThrow()
   return output[0]
 endfunction
 
+function! s:UpdateSubmodule()
+  return FugitiveExecute(["submodule", "update", "--init", "--recursive"])
+endfunction
+
 function! git#BranchOrThrow(arg)
   call git#CleanOrThrow()
   call git#ExecuteOrThrow(["checkout", a:arg], "Failed to checkouot " .. a:arg)
-  call git#ExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed!")
+  call s:UpdateSubmodule()
 endfunction
 
 function! git#GetRefs(ref_prefix, arg)
@@ -276,9 +364,11 @@ function! git#GetMasterOrThrow(remote)
   throw "Failed to determine mainline."
 endfunction
 
-function! git#HashOrThrow(commitish)
+function! git#HashOrThrow(commitish, ...)
+  let arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(arg)
   let msg = "Failed to parse " .. a:commitish
-  let output = git#ExecuteOrThrow(["rev-parse", a:commitish], msg)
+  let output = git#ExecuteOrThrow([dir, "rev-parse", a:commitish], msg)
   return output[0]
 endfunction
 
@@ -290,11 +380,11 @@ endfunction
 
 function! git#CommonParentOrThrow(branch, main)
   let range = git#BranchCommitsOrThrow(a:branch, a:main)
-  let branch_first = range[-1]
-  if empty(branch_first)
+  if empty(range)
     " 'branch' and 'main' are the same commits
     return a:main
   endif
+  let branch_first = range[-1]
   " Go 1 back to find the common commit
   let msg = "Failed to go back 1 commit from " . branch_first
   let output = git#ExecuteOrThrow(["rev-parse", branch_first . "~1"], msg)
@@ -326,7 +416,7 @@ function! UnstagedCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
-  return git#GetUnstaged()->TailItems(a:ArgLead)
+  return git#GetUnstaged()->qutil#FileCompletionPass(a:ArgLead)
 endfunction
 
 function! git#GetUntracked()
@@ -345,14 +435,13 @@ function! UntrackedCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
-  return s:GetUntracked(bang)->TailItems(a:ArgLead)
+  return s:GetUntracked(bang)->qutil#FileCompletionPass(a:ArgLead)
 endfunction
 
 function! git#OpenBranchBufferOrThrow()
   let cmd = ["for-each-ref", "--sort=-committerdate", "refs/heads/", "--format=%(refname:short)"]
   let branches = git#ExecuteOrThrow(cmd)
-  call filter(branches, '!empty(v:val)')
-  call init#CreateOneShotQuickfix('Branches', branches, 'git#SelectBranch')
+  call qutil#CreateOneShotQuickfix(branches, 'Branches', 'git#SelectBranch')
 endfunction
 
 function! git#SelectBranch(branch)
@@ -385,6 +474,8 @@ endfunction
 
 function! git#PullCommand(bang)
   try
+    let submodules = git#ExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed")
+
     let branch = FugitiveHead()
     let check_file = printf("%s/refs/remotes/origin/%s", FugitiveGitDir(), branch)
     if !filereadable(check_file)
@@ -396,11 +487,14 @@ function! git#PullCommand(bang)
 
     const range = printf("%s..origin/%s", branch, branch)
     let args = ["log", "--pretty=format:%h", range]
-    let output = git#ExecuteOrThrow(args, "Failed to log changes!")
-    const commits = filter(output, "!empty(v:val)")
+    const commits = git#ExecuteOrThrow(args, "Failed to log changes!")
 
     if len(commits) <= 0
-      echo "No changes."
+      if len(submodules) <= 0
+        echo "No changes."
+      else
+        echo "Submodules updated."
+      endif
       return
     endif
 
@@ -478,7 +572,7 @@ endfunction
 function! git#DangleCommand()
   let refs = git#RecentRefs(100)
   call filter(refs, 'v:val =~# "^\\x*$"')
-  call init#CreateCustomQuickfix('Dangling commits', refs, 'git#ShowDanglingCommit')
+  call qutil#CreateCustomQuickfix(refs, 'Dangling commits', 'git#ShowDanglingCommit')
 endfunction
 
 function! git#ShowDanglingCommit()
@@ -506,15 +600,138 @@ function! git#SquashCommand()
   endtry
 endfunction
 
-function! git#RebaseCommand()
+function! git#GoToMaster()
+  let main = git#GetMasterOrThrow(v:false)
+  call git#BranchCommand(main)
+  const nobang = ""
+  call git#PullCommand(nobang)
+endfunction
+""}}}
+
+""""""""""""""""""""""""" Rebase """""""""""""""""""""""""" {{{
+function! s:IsRebasing()
+  let file = FugitiveGitDir() .. "/REBASE_HEAD"
+  return filereadable(file)
+endfunction
+
+function! s:GetConflicts()
+  let dict = FugitiveExecute(["diff", "--name-only", "--diff-filter=U"])
+  if dict['exit_status'] != 0
+    throw "Cherry pick failed but no differences found?"
+  endif
+  let conflicts = filter(dict['stdout'], '!empty(v:val)')
+  return init#Unique(conflicts)
+endfunction
+
+function! s:GetHunkRange()
+  let view = winsaveview()
+  call s:SearchOrStay('<\{7}', 'bW')
+  if getline('.') !~ '<\{7}'
+    return []
+  endif
+  let start = line('.')
+  call s:SearchOrStay('>\{7}', 'W')
+  if getline('.') !~ '>\{7}'
+    return []
+  endif
+  let finish = line('.')
+  call winrestview(view)
+  if start <= view.lnum && view.lnum <= finish
+    return [start, finish]
+  else
+    return []
+  endif
+endfunction
+
+function! s:Rebase()
   try
     let main = git#GetMasterOrThrow(v:false)
     call git#ExecuteOrThrow(["fetch", "origin", main])
-    call git#ExecuteOrThrow(["rebase", "origin/" .. main])
-    echo "Rebased onto fresh origin/"  .. main
   catch
     echo v:exception
+    return
   endtry
+  let dict = FugitiveExecute(["rebase", "origin/" .. main])
+  if dict['exit_status'] == 0
+    echo "Rebased onto fresh origin/"  .. main
+  else
+    echo "Conflicts in progress."
+    call s:RebaseConflicts()
+  endif
+endfunction
+
+function! s:RebaseAbort()
+  let res = input("Are you sure? (y/n) ")
+  if res == 'y'
+    call git#ExecuteOrThrow(["rebase", "--abort"])
+  endif
+endfunction
+
+function! s:RebaseContinue()
+  call git#StagedOrThrow()
+  Git rebase --continue
+endfunction
+
+function! s:RebaseConflicts()
+  let conflicts = s:GetConflicts()
+  call qutil#SetQuickfix(conflicts, 'Conflicts')
+endfunction
+
+function s:RebaseHead()
+  call git#EditFugitive()
+  let b:commitish = "HEAD"
+  call git#DiffToggle()
+endfunction
+
+function! s:RebaseTopic()
+  const commitish = "REBASE_HEAD"
+  const name = FugitiveReal()
+  let url = FugitiveFind(printf("%s:%s", commitish, name))
+  exe "drop " .. url
+  let b:commitish = commitish .. "~1"
+  call git#DiffToggle()
+endfunction
+
+function! s:RebaseMain()
+  let range = s:GetHunkRange()
+  if empty(range)
+    echo "Bad hunk."
+    return
+  endif
+
+  let name = FugitiveReal()
+  let range_spec = printf("%s,%s:%s", range[0], range[1], name)
+  let main = git#GetMasterOrThrow(v:true)
+  let ret = git#ExecuteOrThrow(["log", "-1", "-L", range_spec, main, "--format=%H", "--no-patch"])
+  if empty(ret)
+    echo "No commits match the range!"
+    return
+  endif
+  let commitish = ret[0]
+  let url = FugitiveFind(printf("%s:%s", commitish, name))
+  exe "drop " .. url
+  let b:commitish = commitish .. "~1"
+  call git#DiffToggle()
+endfunction
+
+function! s:RebaseStat()
+  let changes = git#ExecuteOrThrow(["diff", "--name-only", "--cached"])
+  let changes = init#Unique(changes)
+  let fugitive_objects = []
+  for file in changes
+    let nr = bufadd(file)
+    call add(fugitive_objects, file)
+    call setbufvar(nr, 'commitish', 'HEAD')
+  endfor
+  call qutil#SetQuickfix(fugitive_objects, 'Stat')
+endfunction
+
+function RebaseCompl(ArgLead, CmdLine, CursorPos)
+  if a:CursorPos < len(a:CmdLine)
+    return []
+  endif
+  let items = ["Abort", "Continue", "Conflicts", "Head", "Topic", "Main", "Stat"]
+  return filter(items, 'stridx(v:val, a:ArgLead) >= 0')
 endfunction
 ""}}}
 
@@ -527,7 +744,7 @@ function! git#Review(bang, arg)
         unlet g:git_review_stack
       else
         let items = g:git_review_stack[-1]
-        call DisplayInQf(items, "Review")
+        call qutil#SetQuickfix(items, "Review")
         echo "Review in progress, refreshing quickfix..."
         return
       endif
@@ -550,8 +767,9 @@ function! git#Review(bang, arg)
       cclose
     else
       let items = s:OrderReviewItems(getqflist())
-      call DisplayInQf(items, "Review")
+      call qutil#SetQuickfix(items, "Review")
       let g:git_review_stack = [items]
+      cc 1
     endif
   catch
     echo v:exception
@@ -591,23 +809,18 @@ function! git#CompleteFiles(cmd_bang, arg) abort
   endif
 
   let new_items = copy(g:git_review_stack[-1])
-  if !empty(a:arg)
-    let idx = printf("stridx(bufname(v:val.bufnr), %s)", string(a:arg))
-    let comp = a:cmd_bang == "!" ? " != " : " == "
-    let new_items = filter(new_items, idx . comp . "-1")
-    let n = len(g:git_review_stack[-1]) - len(new_items)
-    echo "Completed " . n . " files"
-  else
-    let comp = a:cmd_bang == "!" ? " == " : " != "
-    let bufnr = bufnr(FugitiveReal(bufname("%")))
-    let new_items = filter(new_items, "v:val.bufnr" . comp . bufnr)
-  endif
+  let arg = empty(a:arg) ? bufname("%") : a:arg
+  let idx = printf("stridx(bufname(v:val.bufnr), %s)", string(arg))
+  let comp = a:cmd_bang == "!" ? " != " : " == "
+  call filter(new_items, idx . comp . "-1")
+  let n = len(g:git_review_stack[-1]) - len(new_items)
+  echo "Completed " . n . " files"
   call add(g:git_review_stack, new_items)
   if empty(new_items)
     call init#Warn("Review completed")
     unlet g:git_review_stack
   else
-    call DisplayInQf(new_items, "Review")
+    call qutil#SetQuickfix(new_items, "Review")
     cc
   endif
 endfunction
@@ -619,7 +832,7 @@ function CompleteCompl(ArgLead, CmdLine, CursorPos)
   if !exists('g:git_review_stack')
     return []
   endif
-  return SplitItems(g:git_review_stack[-1], a:ArgLead)
+  return qutil#ComponentCompletionPass(g:git_review_stack[-1], a:ArgLead)
 endfunction
 
 function! git#PostponeFile()
@@ -641,7 +854,7 @@ function! git#PostponeFile()
     call git#DiffToggle()
   endif
   " Refresh quickfix
-  call DisplayInQf(list, "Review")
+  call qutil#SetQuickfix(list, "Review")
   cc
 endfunction
 
@@ -653,7 +866,7 @@ function! git#UncompleteFiles()
   if len(g:git_review_stack) > 1
     call remove(g:git_review_stack, -1)
     let items = g:git_review_stack[-1]
-    call DisplayInQf(items, "Review")
+    call qutil#SetQuickfix(items, "Review")
   endif
 endfunction
 ""}}}
@@ -697,7 +910,7 @@ function! git#Pickaxe(keyword)
         let idx += 1
       endwhile
     endfor
-    call DisplayInQf(output, 'Pickaxe')
+    call qutil#SetQuickfix(output, 'Pickaxe')
   catch
     echo v:exception
   endtry
@@ -711,17 +924,17 @@ function! git#Install()
   nnoremap <silent> ]n <cmd> call git#NextContext(v:false)<CR>
   omap an <cmd> call git#ContextMotion()<CR>
 
-  nnoremap <silent> <leader>dif <cmd> call git#DiffToggle()<CR>
+  nnoremap <silent> <leader>d <cmd> call git#DiffToggle()<CR>
   autocmd! OptionSet diff call git#DiffToggleMaps()
 
   command! -nargs=? -complete=customlist,BranchCompl Changes
         \ call git#ShowChanges(<q-args>)
 
   command! -nargs=? -complete=customlist,UnstagedCompl Dirty
-        \ call git#GetUnstaged()->FileFilter(<q-args>)->DropInQf("Unstaged")
+        \ call git#GetUnstaged()->qutil#CommandPass(<q-args>)->qutil#DropInQuickfix("Unstaged")
 
   command! -nargs=? -complete=customlist,UntrackedCompl Untracked
-        \ call git#GetUntracked()->FileFilter(<q-args>)->DropInQf("Untracked")
+        \ call git#GetUntracked()->qutil#CommandPass(<q-args>)->qutil#DropInQuickfix("Untracked")
 
   command! -nargs=? -complete=customlist,BranchCompl Branch call git#BranchCommand(<q-args>)
 
@@ -738,7 +951,9 @@ function! git#Install()
 
   command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
-  command! -nargs=0 Rebase call git#RebaseCommand()
+  command! Master call git#GoToMaster()
+  command! -nargs=? -complete=customlist,RebaseCompl Rebase call init#TryCall(expand("<SID>") .. 'Rebase' .. <q-args>)
+  command! -nargs=0 Resolve call git#OursOrTheirs()
 
   command! -nargs=? -bang -complete=customlist,BranchCompl Review call git#Review("<bang>", <q-args>)
   command! -nargs=0 -bang D Review<bang> HEAD
