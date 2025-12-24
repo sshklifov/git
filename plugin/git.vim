@@ -63,7 +63,7 @@ function! git#ShowChanges(arg)
     " Changes made by branch (relative to mainline).
     let mainline = git#GetMasterOrThrow(v:true)
     let bpoint = git#CommonParentOrThrow(arg, mainline)
-    let range = printf('%s..%s', gpoint, arg)
+    let range = printf('%s..%s', bpoint, arg)
     let files = git#ExecuteOrThrow(["diff", "--name-only", range])
   else
     echo "No valid start point!"
@@ -813,8 +813,6 @@ function! git#CompleteFiles(cmd_bang, arg) abort
   let idx = printf("stridx(bufname(v:val.bufnr), %s)", string(arg))
   let comp = a:cmd_bang == "!" ? " != " : " == "
   call filter(new_items, idx . comp . "-1")
-  let n = len(g:git_review_stack[-1]) - len(new_items)
-  echo "Completed " . n . " files"
   call add(g:git_review_stack, new_items)
   if empty(new_items)
     call init#Warn("Review completed")
