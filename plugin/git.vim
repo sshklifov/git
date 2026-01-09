@@ -644,6 +644,11 @@ function! s:GetHunkRange()
 endfunction
 
 function! s:Rebase()
+  if s:IsRebasing()
+    echom "Rebase in progress..."
+    return s:RebaseConflicts()
+  endif
+
   try
     let main = git#GetMasterOrThrow(v:false)
     call git#ExecuteOrThrow(["fetch", "origin", main])
