@@ -21,6 +21,19 @@ function! git#GetBranch(...)
   return dict['stdout'][0]
 endfunction
 
+function! git#IsRepoFile(file, ...)
+  let repo = a:0 > 0 ? a:1 : FugitiveWorkTree()
+  if empty(repo)
+    return v:false
+  endif
+  let repo = fnamemodify(repo, ":p")
+  if repo[-1:-1] != '/'
+    let repo .= '/'
+  endif
+  let fullname = fnamemodify(a:file, ":p")
+  return strlen(fullname) >= len(repo) && fullname[:strlen(repo)-1] == repo
+endfunction
+
 function! git#ExecuteOrThrow(args, ...)
   let dict = FugitiveExecute(a:args)
   if dict['exit_status'] != 0
@@ -918,6 +931,36 @@ function! git#Pickaxe(keyword)
     echo v:exception
   endtry
 endfunction
+
+function! git#PickaxeTimeline(keyword)
+  let output = []
+  try
+    let files = git#ExecuteOrThrow(["grep", "-l", a:keyword])
+    for file in files
+      let blame = git#ExecuteOrThrow(["blame", "-p", "--", file])
+      let idx = 0
+      while idx < len(blame)
+        if blame[idx] =~# '^\x\{40\}'
+          let [_, commit, lnum; _] = matchlist(blame[idx], '\(\x*\) \d* \(\d*\)')
+            while blame[idx][0] != "\t"
+              let idx += 1
+            endwhile
+            if stridx(blame[idx], a:keyword) >= 0
+              call add(output, #{filename: file, lnum: lnum, text: blame[idx][1:], commit: commit})
+            endif
+        endif
+        let idx += 1
+      endwhile
+    endfor
+    let commit_order = git#ExecuteOrThrow(["rev-list", "--first-parent", "HEAD"])
+    let commit_index = #{}
+    for i in range(len(commit_order))
+      let commit_index[commit_order[i]] = i
+    endfor
+    call sort(output, {a, b -> commit_index[a.commit] - commit_index[b.commit]})
+    call qutil#SetQuickfix(output, 'Pickaxe')
+  endtry
+endfunction
 ""}}}
 
 """"""""""""""""""""""""" Install """"""""""""""""""""""""""" {{{
@@ -967,8 +1010,19 @@ function! git#Install()
   nnoremap <silent> <leader>ok <cmd> Complete<CR>
   nnoremap <silent> <leader>nok <cmd> call git#PostponeFile()<CR>
 
-  command! -nargs=0 Todo call git#Pickaxe('TODO')
-  command! -nargs=* Pickaxe call git#Pickaxe(<q-args>)
+  command! -nargs=0 -bang -bar Todo
+        \ if empty("<bang>") |
+        \   call git#Pickaxe('TODO') |
+        \ else |
+        \   call git#PickaxeTimeline('TODO') |
+        \ endif
+
+  command! -nargs=* -bang Pickaxe
+        \ if empty("<bang>") |
+        \   call git#Pickaxe(<q-args>) |
+        \ else |
+        \   call git#PickaxeTimeline(<q-args>) |
+        \ endif
 endfunction
 
 if get(g:, 'git_install', v:false)
