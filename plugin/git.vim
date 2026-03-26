@@ -963,6 +963,50 @@ function! git#PickaxeTimeline(keyword)
 endfunction
 ""}}}
 
+""""""""""""""""""""""""" Worktree """"""""""""""""""""""""""" {{{
+function! git#OpenWorktree(branch)
+  const orig_repo = FugitiveWorkTree()
+  if empty(orig_repo)
+    echo "Not inside repo"
+    return
+  endif
+
+  let path = stdpath("state") .. "/worktree"
+
+  let wts = git#ExecuteOrThrow(["worktree", "list", "--porcelain"])
+  if index(wts, "worktree " .. path) < 0
+    echo "Repo has not opened a worktree!"
+    return
+  endif
+
+  if empty(a:branch)
+    exe "e " .. path
+    return
+  endif
+
+  if isdirectory(path)
+    let answer = input("Worktree already exists. Remove it? [y/N]: ")
+    if tolower(answer) !=# 'y'
+      return
+    endif
+    call delete(path, 'rf')
+    let bufs = map(getbufinfo({'buflisted': 1}), 'v:val.bufnr')
+    for b in bufs
+      if stridx(bufname(b), path) == 0
+        exe "bwipeout " .. b
+      endif
+    endfor
+    call git#ExecuteOrThrow(["worktree", "prune"])
+  endif
+  call git#ExecuteOrThrow(["worktree", "add", path, a:branch])
+
+  exe "e " .. path
+  call s:UpdateSubmodule()
+  call init#CreateClangd()
+  call qutil#Make(work#GetMakeCommandFor(orig_repo), "!")
+endfunction
+""}}}
+
 """"""""""""""""""""""""" Install """"""""""""""""""""""""""" {{{
 function! git#Install()
   nnoremap <silent> <leader>fug <cmd> call git#EditFugitive()<CR>
@@ -994,6 +1038,8 @@ function! git#Install()
   cabbr Ref Reference
 
   command! -nargs=0 Dangle call git#DangleCommand()
+
+  command! -nargs=? -complete=customlist,BranchCompl Wtree call git#OpenWorktree(<q-args>)
 
   command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
