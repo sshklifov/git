@@ -288,7 +288,7 @@ function! git#CleanOrThrow(...)
   endif
 
   if !clean
-    call s:UpdateSubmodule()
+    call git#UpdateSubmodule()
   endif
 
   if a:0 > 0
@@ -317,7 +317,7 @@ function! git#StagedOrThrow(...)
   endif
 
   if !clean
-    call s:UpdateSubmodule()
+    call git#UpdateSubmodule()
   endif
 
   if a:0 > 0
@@ -336,18 +336,22 @@ function! git#GetBranchOrThrow()
   return output[0]
 endfunction
 
-function! s:UpdateSubmodule()
-  return FugitiveExecute(["submodule", "update", "--init", "--recursive"])
+function! git#UpdateSubmodule(...)
+  let arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(arg)
+  return FugitiveExecute([dir, "submodule", "update", "--init", "--recursive"])
 endfunction
 
 function! git#BranchOrThrow(arg)
   call git#CleanOrThrow()
   call git#ExecuteOrThrow(["checkout", a:arg], "Failed to checkouot " .. a:arg)
-  call s:UpdateSubmodule()
+  call git#UpdateSubmodule()
 endfunction
 
-function! git#GetRefs(ref_prefix, arg)
-  let dict = FugitiveExecute(['for-each-ref', '--format=%(refname)'])
+function! git#GetRefs(ref_prefix, arg, ...)
+  let opt_arg = get(a:000, 0, FugitiveGitDir())
+  let dir = FugitiveExtractGitDir(opt_arg)
+  let dict = FugitiveExecute([dir, 'for-each-ref', '--format=%(refname)'])
   if dict['exit_status'] != 0
     return []
   endif
@@ -451,10 +455,10 @@ function! UntrackedCompl(ArgLead, CmdLine, CursorPos)
   return s:GetUntracked(bang)->qutil#FileCompletionPass(a:ArgLead)
 endfunction
 
-function! git#OpenBranchBufferOrThrow()
+function! git#OpenBranchBufferOrThrow(cb)
   let cmd = ["for-each-ref", "--sort=-committerdate", "refs/heads/", "--format=%(refname:short)"]
   let branches = git#ExecuteOrThrow(cmd)
-  call qutil#CreateOneShotQuickfix(branches, 'Branches', 'git#SelectBranch')
+  call qutil#CreateOneShotQuickfix(branches, 'Branches', a:cb)
 endfunction
 
 function! git#SelectBranch(branch)
@@ -469,13 +473,22 @@ function! git#BranchCommand(args)
   try
     call git#CleanOrThrow()
     if empty(a:args)
-      call git#OpenBranchBufferOrThrow()
+      call git#OpenBranchBufferOrThrow('git#SelectBranch')
     else
       call git#BranchOrThrow(a:args)
     endif
   catch
     echo v:exception
   endtry
+endfunction
+
+function! git#FetchCommand(bang, branch)
+  let args =["branch", "--track", a:branch] 
+  if !empty(a:bang)
+    call add(args, "--force")
+  endif
+  call add(args, "origin/" .. a:branch)
+  call git#ExecuteOrThrow(args)
 endfunction
 
 function! BranchCompl(ArgLead, CmdLine, CursorPos)
@@ -542,7 +555,7 @@ function! git#PushCommand(bang)
   endtry
 endfunction
 
-function! OriginCompl(ArgLead, CmdLine, CursorPos)
+function! git#OriginCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
@@ -550,6 +563,14 @@ function! OriginCompl(ArgLead, CmdLine, CursorPos)
     return []
   endif
 
+  call FugitiveExecute(['fetch', 'origin'])
+  return git#GetRefs('refs/remotes/origin/', a:ArgLead)
+endfunction
+
+function! git#FetchCompl(ArgLead, CmdLine, CursorPos)
+  if a:CursorPos < len(a:CmdLine)
+    return []
+  endif
   call FugitiveExecute(['fetch', 'origin'])
   return git#GetRefs('refs/remotes/origin/', a:ArgLead)
 endfunction
@@ -622,21 +643,30 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Rebase """""""""""""""""""""""""" {{{
-function! s:IsRebasing()
+function! git#IsRebasing()
+  if git#IsCherryPicking()
+    return false
+  endif
   let file = FugitiveGitDir() .. "/REBASE_HEAD"
   return filereadable(file)
 endfunction
 
-function! s:GetConflicts()
+function! git#IsCherryPicking()
+  let file = FugitiveGitDir() .. "/CHERRY_PICK_HEAD"
+  return filereadable(file)
+endfunction
+
+function! git#GetConflicts()
   let dict = FugitiveExecute(["diff", "--name-only", "--diff-filter=U"])
   if dict['exit_status'] != 0
-    throw "Cherry pick failed but no differences found?"
+    call init#ShowErrors(dict['stderr'])
+    throw "Failed to get conflicts"
   endif
   let conflicts = filter(dict['stdout'], '!empty(v:val)')
   return init#Unique(conflicts)
 endfunction
 
-function! s:GetHunkRange()
+function! git#GetHunkRangeAtCursor()
   let view = winsaveview()
   call s:SearchOrStay('<\{7}', 'bW')
   if getline('.') !~ '<\{7}'
@@ -656,12 +686,11 @@ function! s:GetHunkRange()
   endif
 endfunction
 
-function! s:Rebase()
-  if s:IsRebasing()
-    echom "Rebase in progress..."
-    return s:RebaseConflicts()
+function! s:RebaseCommand()
+  if git#IsRebasing() || git#IsCherryPicking()
+    echo "Conflicts in progress."
+    return s:ConflictsStat()
   endif
-
   try
     let main = git#GetMasterOrThrow(v:false)
     call git#ExecuteOrThrow(["fetch", "origin", main])
@@ -674,34 +703,52 @@ function! s:Rebase()
     echo "Rebased onto fresh origin/"  .. main
   else
     echo "Conflicts in progress."
-    call s:RebaseConflicts()
+    call s:ConflictsStat()
   endif
 endfunction
 
-function! s:RebaseAbort()
+function! s:ConflictsAbort()
   let res = input("Are you sure? (y/n) ")
   if res == 'y'
-    call git#ExecuteOrThrow(["rebase", "--abort"])
+    if git#IsCherryPicking()
+      call git#ExecuteOrThrow(["cherry-pick", "--abort"])
+    elseif git#IsRebasing()
+      call git#ExecuteOrThrow(["rebase", "--abort"])
+    else
+      echo "Not rebasing or cherry picking"
+    endif
   endif
 endfunction
 
-function! s:RebaseContinue()
+function! s:ConflictsContinue()
   call git#StagedOrThrow()
-  Git rebase --continue
+  if git#IsCherryPicking()
+    call git#ExecuteOrThrow(["cherry-pick", "--continue"])
+  elseif git#IsRebasing()
+    call git#ExecuteOrThrow(["rebase", "--continue"])
+  else
+    echo "Not rebasing or cherry picking"
+  endif
 endfunction
 
-function! s:RebaseConflicts()
-  let conflicts = s:GetConflicts()
-  call qutil#SetQuickfix(conflicts, 'Conflicts')
+function! s:Conflicts()
+  let conflicts = git#GetConflicts()
+  let items = []
+  for file in conflicts
+    let lines = readfile(file)
+    let matches = matchstrlist(lines, '<\{7}')
+    let items += map(matches, '#{filename: file, lnum: v:val.idx + 1, col: 1, text: lines[v:val.idx] }')
+  endfor
+  call qutil#SetQuickfix(items, 'Conflicts')
 endfunction
 
-function s:RebaseHead()
+function s:ConflictsDiffHead()
   call git#EditFugitive()
   let b:commitish = "HEAD"
   call git#DiffToggle()
 endfunction
 
-function! s:RebaseTopic()
+function! s:ConflictsDiffTopic()
   const commitish = "REBASE_HEAD"
   const name = FugitiveReal()
   let url = FugitiveFind(printf("%s:%s", commitish, name))
@@ -710,10 +757,10 @@ function! s:RebaseTopic()
   call git#DiffToggle()
 endfunction
 
-function! s:RebaseMain()
-  let range = s:GetHunkRange()
+function! s:ConflictsDiffMain()
+  let range = git#GetHunkRangeAtCursor()
   if empty(range)
-    echo "Bad hunk."
+    echo "Place cursor inside hunk."
     return
   endif
 
@@ -732,25 +779,14 @@ function! s:RebaseMain()
   call git#DiffToggle()
 endfunction
 
-function! s:RebaseStat()
-  let changes = git#ExecuteOrThrow(["diff", "--name-only", "--cached"])
-  let changes = init#Unique(changes)
-  let fugitive_objects = []
-  for file in changes
-    let nr = bufadd(file)
-    call add(fugitive_objects, file)
-    call setbufvar(nr, 'commitish', 'HEAD')
-  endfor
-  call qutil#SetQuickfix(fugitive_objects, 'Stat')
-endfunction
-
-function RebaseCompl(ArgLead, CmdLine, CursorPos)
+function ConflictsCompl(ArgLead, CmdLine, CursorPos)
   if a:CursorPos < len(a:CmdLine)
     return []
   endif
-  let items = ["Abort", "Continue", "Conflicts", "Head", "Topic", "Main", "Stat"]
+  let items = ["Abort", "Continue", "DiffHead", "DiffTopic", "DiffMain"]
   return filter(items, 'stridx(v:val, a:ArgLead) >= 0')
 endfunction
+
 ""}}}
 
 """"""""""""""""""""""""" Review """"""""""""""""""""""""""" {{{
@@ -964,31 +1000,34 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Worktree """"""""""""""""""""""""""" {{{
-function! git#OpenWorktree(branch)
+function! git#OpenWorktree(bang, branch)
+  const path = stdpath("state") .. "/worktree"
   const orig_repo = FugitiveWorkTree()
-  if empty(orig_repo)
-    echo "Not inside repo"
+
+  if empty(a:branch) && empty(a:bang)
+    if isdirectory(path)
+      exe "e " .. path
+    else
+      echo "No worktree opened yet!"
+    endif
     return
   endif
 
-  let path = stdpath("state") .. "/worktree"
-
-  let wts = git#ExecuteOrThrow(["worktree", "list", "--porcelain"])
-  if index(wts, "worktree " .. path) < 0
-    echo "Repo has not opened a worktree!"
+  if path == orig_repo
+    echo "Recursion detected."
     return
   endif
 
-  if empty(a:branch)
-    exe "e " .. path
-    return
-  endif
-
-  if isdirectory(path)
-    let answer = input("Worktree already exists. Remove it? [y/N]: ")
+  if empty(a:bang) && isdirectory(path)
+    let answer = input("Worktree exists. Remove it? [y/N]: ")
     if tolower(answer) !=# 'y'
       return
     endif
+  endif
+
+  let was_git_repo = ''
+  if isdirectory(path)
+    let old_git_repo = git#ExecuteOrThrow(['rev-parse', '--git-common-dir'])[0]
     call delete(path, 'rf')
     let bufs = map(getbufinfo({'buflisted': 1}), 'v:val.bufnr')
     for b in bufs
@@ -996,14 +1035,27 @@ function! git#OpenWorktree(branch)
         exe "bwipeout " .. b
       endif
     endfor
-    call git#ExecuteOrThrow(["worktree", "prune"])
+    call git#ExecuteOrThrow([old_git_repo, "worktree", "prune"])
   endif
-  call git#ExecuteOrThrow(["worktree", "add", path, a:branch])
 
+  if empty(orig_repo)
+    echo "Not inside repo"
+    return
+  endif
+
+  if !empty(a:branch)
+    call git#SelectBranchForWorktree(orig_repo, a:branch)
+  endif
+endfunction
+
+function git#SelectBranchForWorktree(orig_repo, branch)
+  const path = stdpath("state") .. "/worktree"
+  let git = a:orig_repo . "/.git"
+  call git#ExecuteOrThrow([git, "worktree", "add", path, a:branch])
   exe "e " .. path
-  call s:UpdateSubmodule()
+  call git#UpdateSubmodule()
   call init#CreateClangd()
-  call qutil#Make(work#GetMakeCommandFor(orig_repo), "!")
+  call qutil#Make(work#GetMakeCommand(), "!")
 endfunction
 ""}}}
 
@@ -1028,8 +1080,10 @@ function! git#Install()
 
   command! -nargs=? -complete=customlist,BranchCompl Branch call git#BranchCommand(<q-args>)
 
-  command! -nargs=1 -bang -complete=customlist,OriginCompl Origin
+  command! -nargs=1 -bang -complete=customlist,git#OriginCompl Origin
         \ call git#BranchOrThrow(<q-args>)
+
+  command! -nargs=1 -bang -complete=customlist,git#FetchCompl Fetch call git#FetchCommand("<bang>", <q-args>)
 
   command! -bang -nargs=0 Pull call git#PullCommand("<bang>")
 
@@ -1039,12 +1093,13 @@ function! git#Install()
 
   command! -nargs=0 Dangle call git#DangleCommand()
 
-  command! -nargs=? -complete=customlist,BranchCompl Wtree call git#OpenWorktree(<q-args>)
+  command! -bang -nargs=? -complete=customlist,BranchCompl Wtree call git#OpenWorktree("<bang>", <q-args>)
 
   command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
   command! Master call git#GoToMaster()
-  command! -nargs=? -complete=customlist,RebaseCompl Rebase call init#TryCall(expand("<SID>") .. 'Rebase' .. <q-args>)
+  command! -nargs=0 Rebase call s:RebaseCommand()
+  command! -nargs=? -complete=customlist,ConflictsCompl Conflicts call init#TryCall(expand("<SID>") .. 'Conflicts' .. <q-args>)
   command! -nargs=0 Resolve call git#OursOrTheirs()
 
   command! -nargs=? -bang -complete=customlist,BranchCompl Review call git#Review("<bang>", <q-args>)
