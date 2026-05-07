@@ -482,8 +482,9 @@ function! git#BranchCommand(args)
   endtry
 endfunction
 
-function! git#FetchCommand(bang, branch)
-  let args =["branch", "--track", a:branch] 
+function! git#TrackBranch(bang, branch, ...)
+  let git_dir = get(a:000, 0, FugitiveGitDir())
+  let args =[git_dir, "branch", "--track", a:branch] 
   if !empty(a:bang)
     call add(args, "--force")
   endif
@@ -511,7 +512,14 @@ function! git#PullCommand(bang)
     let args = ["fetch", "origin", branch]
     call git#ExecuteOrThrow(args, "Failed to fetch!")
 
-    const range = printf("%s..origin/%s", branch, branch)
+    if empty(a:bang)
+      const range = printf("%s..origin/%s", branch, branch)
+    else
+      let master = git#GetMasterOrThrow(v:false)
+      call git#ExecuteOrThrow(args, "Failed to fetch!")
+      let args = ["fetch", "origin", master]
+      const range = printf("origin/%s..origin/%s", master, branch)
+    endif
     let args = ["log", "--pretty=format:%h", range]
     const commits = git#ExecuteOrThrow(args, "Failed to log changes!")
 
@@ -645,10 +653,15 @@ endfunction
 """"""""""""""""""""""""" Rebase """""""""""""""""""""""""" {{{
 function! git#IsRebasing()
   if git#IsCherryPicking()
-    return false
+    return v:false
   endif
-  let file = FugitiveGitDir() .. "/REBASE_HEAD"
-  return filereadable(file)
+
+  let dir = FugitiveGitDir() .. "/rebase-merge"
+  if isdirectory(dir)
+    return v:true
+  endif
+  let dir = FugitiveGitDir() .. "/rebase-apply"
+  return isdirectory(dir)
 endfunction
 
 function! git#IsCherryPicking()
@@ -686,10 +699,24 @@ function! git#GetHunkRangeAtCursor()
   endif
 endfunction
 
-function! s:RebaseCommand()
+function! s:RebaseCommand(args)
+  if empty(a:args)
+    call s:RebaseOntoMaster()
+  else
+    call function("s:Conflicts" .. a:args)()
+  endif
+endfunction
+
+function! s:RebaseOntoMaster()
   if git#IsRebasing() || git#IsCherryPicking()
-    echo "Conflicts in progress."
-    return s:ConflictsStat()
+    let conflicts = git#GetConflicts()
+    if empty(conflicts)
+      echo "Rebase in progress (no conflicts)."
+    else
+      echo "Rebase in progress..."
+      call s:ShowConflicts(conflicts)
+    endif
+    return
   endif
   try
     let main = git#GetMasterOrThrow(v:false)
@@ -703,7 +730,7 @@ function! s:RebaseCommand()
     echo "Rebased onto fresh origin/"  .. main
   else
     echo "Conflicts in progress."
-    call s:ConflictsStat()
+    call s:Conflicts()
   endif
 endfunction
 
@@ -711,9 +738,9 @@ function! s:ConflictsAbort()
   let res = input("Are you sure? (y/n) ")
   if res == 'y'
     if git#IsCherryPicking()
-      call git#ExecuteOrThrow(["cherry-pick", "--abort"])
+      Git cherry-pick --abort
     elseif git#IsRebasing()
-      call git#ExecuteOrThrow(["rebase", "--abort"])
+      Git rebase --abort
     else
       echo "Not rebasing or cherry picking"
     endif
@@ -723,9 +750,9 @@ endfunction
 function! s:ConflictsContinue()
   call git#StagedOrThrow()
   if git#IsCherryPicking()
-    call git#ExecuteOrThrow(["cherry-pick", "--continue"])
+    Git cherry-pick --continue
   elseif git#IsRebasing()
-    call git#ExecuteOrThrow(["rebase", "--continue"])
+    Git rebase --continue
   else
     echo "Not rebasing or cherry picking"
   endif
@@ -733,8 +760,12 @@ endfunction
 
 function! s:Conflicts()
   let conflicts = git#GetConflicts()
+  call s:ShowConflicts(conflicts)
+endfunction
+
+function! s:ShowConflicts(conflicts)
   let items = []
-  for file in conflicts
+  for file in a:conflicts
     let lines = readfile(file)
     let matches = matchstrlist(lines, '<\{7}')
     let items += map(matches, '#{filename: file, lnum: v:val.idx + 1, col: 1, text: lines[v:val.idx] }')
@@ -1000,11 +1031,11 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Worktree """"""""""""""""""""""""""" {{{
-function! git#OpenWorktree(bang, branch)
+function! git#OpenWorktree(branch, repo, make_opts)
   const path = stdpath("state") .. "/worktree"
-  const orig_repo = FugitiveWorkTree()
+  const orig_repo = a:repo
 
-  if empty(a:branch) && empty(a:bang)
+  if empty(a:branch)
     if isdirectory(path)
       exe "e " .. path
     else
@@ -1018,16 +1049,26 @@ function! git#OpenWorktree(bang, branch)
     return
   endif
 
-  if empty(a:bang) && isdirectory(path)
-    let answer = input("Worktree exists. Remove it? [y/N]: ")
-    if tolower(answer) !=# 'y'
-      return
-    endif
+  if empty(orig_repo)
+    echo "Not inside repo"
+    return
   endif
 
-  let was_git_repo = ''
+  call git#CloseWorktree()
+
+  let git_dir = FugitiveExtractGitDir(orig_repo)
+  call git#ExecuteOrThrow([git_dir, "worktree", "add", path, a:branch])
+  exe "e " .. path
+  only
+  call git#UpdateSubmodule()
+  call init#CreateClangd()
+  call qutil#Make(work#GetMakeCommand(), a:make_opts)
+endfunction
+
+function! git#CloseWorktree()
+  const path = stdpath("state") .. "/worktree"
   if isdirectory(path)
-    let old_git_repo = git#ExecuteOrThrow(['rev-parse', '--git-common-dir'])[0]
+    let old_git_repo = git#ExecuteOrThrow([FugitiveExtractGitDir(path), 'rev-parse', '--git-common-dir'])[0]
     call delete(path, 'rf')
     let bufs = map(getbufinfo({'buflisted': 1}), 'v:val.bufnr')
     for b in bufs
@@ -1037,26 +1078,8 @@ function! git#OpenWorktree(bang, branch)
     endfor
     call git#ExecuteOrThrow([old_git_repo, "worktree", "prune"])
   endif
-
-  if empty(orig_repo)
-    echo "Not inside repo"
-    return
-  endif
-
-  if !empty(a:branch)
-    call git#SelectBranchForWorktree(orig_repo, a:branch)
-  endif
 endfunction
 
-function git#SelectBranchForWorktree(orig_repo, branch)
-  const path = stdpath("state") .. "/worktree"
-  let git = a:orig_repo . "/.git"
-  call git#ExecuteOrThrow([git, "worktree", "add", path, a:branch])
-  exe "e " .. path
-  call git#UpdateSubmodule()
-  call init#CreateClangd()
-  call qutil#Make(work#GetMakeCommand(), "!")
-endfunction
 ""}}}
 
 """"""""""""""""""""""""" Install """"""""""""""""""""""""""" {{{
@@ -1083,7 +1106,7 @@ function! git#Install()
   command! -nargs=1 -bang -complete=customlist,git#OriginCompl Origin
         \ call git#BranchOrThrow(<q-args>)
 
-  command! -nargs=1 -bang -complete=customlist,git#FetchCompl Fetch call git#FetchCommand("<bang>", <q-args>)
+  command! -nargs=1 -bang -complete=customlist,git#FetchCompl Fetch call git#TrackBranch("<bang>", <q-args>)
 
   command! -bang -nargs=0 Pull call git#PullCommand("<bang>")
 
@@ -1093,12 +1116,12 @@ function! git#Install()
 
   command! -nargs=0 Dangle call git#DangleCommand()
 
-  command! -bang -nargs=? -complete=customlist,BranchCompl Wtree call git#OpenWorktree("<bang>", <q-args>)
+  command! -bang -nargs=? -complete=customlist,BranchCompl Wtree call git#OpenWorktree(<q-args>, FugitiveWorkTree(), #{preview: <bang>0})
 
   command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
   command! Master call git#GoToMaster()
-  command! -nargs=0 Rebase call s:RebaseCommand()
+  command! -nargs=? -complete=customlist,ConflictsCompl Rebase call s:RebaseCommand(<q-args>)
   command! -nargs=? -complete=customlist,ConflictsCompl Conflicts call init#TryCall(expand("<SID>") .. 'Conflicts' .. <q-args>)
   command! -nargs=0 Resolve call git#OursOrTheirs()
 
