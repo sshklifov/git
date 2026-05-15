@@ -1031,8 +1031,12 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Worktree """"""""""""""""""""""""""" {{{
+function! git#WorktreePath()
+  return stdpath("state") .. "/worktree"
+endfunction
+
 function! git#OpenWorktree(branch, repo, make_opts)
-  const path = stdpath("state") .. "/worktree"
+  const path = git#WorktreePath()
   const orig_repo = a:repo
 
   if empty(a:branch)
@@ -1066,7 +1070,7 @@ function! git#OpenWorktree(branch, repo, make_opts)
 endfunction
 
 function! git#CloseWorktree()
-  const path = stdpath("state") .. "/worktree"
+  const path = git#WorktreePath()
   if isdirectory(path)
     let old_git_repo = git#ExecuteOrThrow([FugitiveExtractGitDir(path), 'rev-parse', '--git-common-dir'])[0]
     call delete(path, 'rf')
