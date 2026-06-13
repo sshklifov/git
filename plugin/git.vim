@@ -66,22 +66,12 @@ function! git#GetObjectHash()
   endif
 endfunction
 
-function! git#ShowChanges(arg)
+function! git#ShowChanges(arg, num_commits)
   let arg = empty(a:arg) ? git#GetObjectHash() : a:arg
-  if arg =~ '\x\{7,40\}'
-    " Single commit only.
-    let files = git#ExecuteOrThrow(["show", "--name-only", "--pretty=format:", arg])
-    let bpoint = git#HashOrThrow(arg .. "~1")
-  elseif !empty(arg)
-    " Changes made by branch (relative to mainline).
-    let mainline = git#GetMasterOrThrow(v:true)
-    let bpoint = git#CommonParentOrThrow(arg, mainline)
-    let range = printf('%s..%s', bpoint, arg)
-    let files = git#ExecuteOrThrow(["diff", "--name-only", range])
-  else
-    echo "No valid start point!"
-    return
-  endif
+  let bpoint = git#HashOrThrow(arg .. "~" .. a:num_commits)
+  let range = printf('%s..%s', bpoint, arg)
+  let files = git#ExecuteOrThrow(["diff", "--name-only", range])
+
   let repo = FugitiveWorkTree() .. '/'
   call map(files, 'repo .. v:val')
 
@@ -504,11 +494,6 @@ function! git#PullCommand(bang)
     let submodules = git#ExecuteOrThrow(["submodule", "update", "--init", "--recursive"], "Submodule update failed")
 
     let branch = FugitiveHead()
-    let check_file = printf("%s/refs/remotes/origin/%s", FugitiveGitDir(), branch)
-    if !filereadable(check_file)
-      call init#Warn("Could not find origin/" .. branch)
-    endif
-
     let args = ["fetch", "origin", branch]
     call git#ExecuteOrThrow(args, "Failed to fetch!")
 
@@ -700,14 +685,6 @@ function! git#GetHunkRangeAtCursor()
 endfunction
 
 function! s:RebaseCommand(args)
-  if empty(a:args)
-    call s:RebaseOntoMaster()
-  else
-    call function("s:Conflicts" .. a:args)()
-  endif
-endfunction
-
-function! s:RebaseOntoMaster()
   if git#IsRebasing() || git#IsCherryPicking()
     let conflicts = git#GetConflicts()
     if empty(conflicts)
@@ -719,7 +696,7 @@ function! s:RebaseOntoMaster()
     return
   endif
   try
-    let main = git#GetMasterOrThrow(v:false)
+    let main = empty(a:args) ? git#GetMasterOrThrow(v:false) : a:args
     call git#ExecuteOrThrow(["fetch", "origin", main])
   catch
     echo v:exception
@@ -733,6 +710,9 @@ function! s:RebaseOntoMaster()
     call s:Conflicts()
   endif
 endfunction
+
+" TODO no way to call it now...
+    " call function("s:Conflicts" .. a:args)()
 
 function! s:ConflictsAbort()
   let res = input("Are you sure? (y/n) ")
@@ -821,11 +801,11 @@ endfunction
 ""}}}
 
 """"""""""""""""""""""""" Review """"""""""""""""""""""""""" {{{
-function! git#Review(bang, arg)
+function! git#Review(arg)
   try
     " Refresh current state of review
     if exists("g:git_review_stack")
-      if !empty(a:bang)
+      if !empty(a:arg)
         unlet g:git_review_stack
       else
         let items = g:git_review_stack[-1]
@@ -883,7 +863,7 @@ function! s:OrderReviewItems(items)
   return sort(items, {a, b -> a.order - b.order})
 endfunction
 
-function! git#CompleteFiles(cmd_bang, arg) abort
+function! git#CompleteFile() abort
   if !exists("g:git_review_stack")
     echo "Start a review first"
     return
@@ -894,10 +874,7 @@ function! git#CompleteFiles(cmd_bang, arg) abort
   endif
 
   let new_items = copy(g:git_review_stack[-1])
-  let arg = empty(a:arg) ? bufname("%") : a:arg
-  let idx = printf("stridx(bufname(v:val.bufnr), %s)", string(arg))
-  let comp = a:cmd_bang == "!" ? " != " : " == "
-  call filter(new_items, idx . comp . "-1")
+  call filter(new_items, "v:val.bufnr != bufnr()")
   call add(g:git_review_stack, new_items)
   if empty(new_items)
     call init#Warn("Review completed")
@@ -906,16 +883,6 @@ function! git#CompleteFiles(cmd_bang, arg) abort
     call qutil#SetQuickfix(new_items, "Review")
     cc
   endif
-endfunction
-
-function CompleteCompl(ArgLead, CmdLine, CursorPos)
-  if a:CursorPos < len(a:CmdLine)
-    return []
-  endif
-  if !exists('g:git_review_stack')
-    return []
-  endif
-  return qutil#ComponentCompletionPass(g:git_review_stack[-1], a:ArgLead)
 endfunction
 
 function! git#PostponeFile()
@@ -1063,10 +1030,14 @@ function! git#OpenWorktree(branch, repo, make_opts)
   let git_dir = FugitiveExtractGitDir(orig_repo)
   call git#ExecuteOrThrow([git_dir, "worktree", "add", path, a:branch])
   exe "e " .. path
-  only
+  silent only
   call git#UpdateSubmodule()
-  call init#CreateClangd()
-  call qutil#Make(work#GetMakeCommand(), a:make_opts)
+
+  let cmake = path .. "/CMakeLists.txt"
+  if filereadable(cmake)
+    call init#CreateClangd()
+    call qutil#Make(work#GetMakeCommand(), a:make_opts)
+  endif
 endfunction
 
 function! git#CloseWorktree()
@@ -1096,8 +1067,8 @@ function! git#Install()
   nnoremap <silent> <leader>d <cmd> call git#DiffToggle()<CR>
   autocmd! OptionSet diff call git#DiffToggleMaps()
 
-  command! -nargs=? -complete=customlist,BranchCompl Changes
-        \ call git#ShowChanges(<q-args>)
+  command! -nargs=? -count=1 -complete=customlist,BranchCompl Changes
+        \ call git#ShowChanges(<q-args>, <count>)
 
   command! -nargs=? -complete=customlist,UnstagedCompl Dirty
         \ call git#GetUnstaged()->qutil#CommandPass(<q-args>)->qutil#DropInQuickfix("Unstaged")
@@ -1125,17 +1096,16 @@ function! git#Install()
   command! -nargs=? -complete=customlist,BranchCompl Base call init#ToClipboard(git#BaselineOrThrow(<q-args>))
   command! Squash call git#SquashCommand()
   command! Master call git#GoToMaster()
-  command! -nargs=? -complete=customlist,ConflictsCompl Rebase call s:RebaseCommand(<q-args>)
+  command! -nargs=? -complete=customlist,BranchCompl Rebase call s:RebaseCommand(<q-args>)
   command! -nargs=? -complete=customlist,ConflictsCompl Conflicts call init#TryCall(expand("<SID>") .. 'Conflicts' .. <q-args>)
   command! -nargs=0 Resolve call git#OursOrTheirs()
 
-  command! -nargs=? -bang -complete=customlist,BranchCompl Review call git#Review("<bang>", <q-args>)
-  command! -nargs=0 -bang D Review<bang> HEAD
-  command! -nargs=? -bang R Review<bang> <args>
-  command! -bang -nargs=? -complete=customlist,CompleteCompl Complete call git#CompleteFiles('<bang>', <q-args>)
+  command! -nargs=? -complete=customlist,BranchCompl Review call git#Review(<q-args>)
+  command! -nargs=0 D Review HEAD
+  command! -nargs=? R Review <args>
   command! -nargs=0 Uncomplete call git#UncompleteFiles()
 
-  nnoremap <silent> <leader>ok <cmd> Complete<CR>
+  nnoremap <silent> <leader>ok <cmd> call git#CompleteFile()<CR>
   nnoremap <silent> <leader>nok <cmd> call git#PostponeFile()<CR>
 
   command! -nargs=0 -bang -bar Todo
